@@ -1,67 +1,77 @@
 """Core retry decorator implementation."""
 import time
-import logging
-import functools
-from typing import Callable, Optional, Tuple, Type, Union
+from functools import wraps
+from typing import Callable, Optional, Type, Tuple
 
 from retryable.backoff import constant
-
-logger = logging.getLogger(__name__)
-
-ExceptionTypes = Union[Type[Exception], Tuple[Type[Exception], ...]]
+from retryable.context import RetryContext, AttemptRecord
+from retryable.exceptions import RetryLimitExceeded, NonRetryableError
+from retryable.hooks import HookSet, EMPTY_HOOKS
+from retryable.predicates import on_all_exceptions
 
 
 def retry(
     max_attempts: int = 3,
-    exceptions: ExceptionTypes = Exception,
-    backoff: Optional[Callable[[int], float]] = None,
-    on_retry: Optional[Callable[[int, Exception], None]] = None,
+    backoff: Callable[[int], float] = constant(1.0),
+    predicate: Callable[[Exception], bool] = on_all_exceptions,
+    reraise: bool = False,
+    hooks: HookSet = EMPTY_HOOKS,
 ) -> Callable:
-    """Decorator that retries a function on failure.
+    """Decorator factory that wraps a function with configurable retry logic.
 
     Args:
-        max_attempts: Maximum number of total attempts (must be >= 1).
-        exceptions: Exception type(s) that should trigger a retry.
-        backoff: Callable that accepts the attempt number (1-based) and
-                 returns the number of seconds to sleep before the next
-                 attempt.  Defaults to ``constant(delay=1.0)``.
-        on_retry: Optional callback invoked before each retry with
-                  ``(attempt, exception)``.
+        max_attempts: Maximum number of attempts before giving up.
+        backoff: Callable(attempt_number) -> seconds to wait.
+        predicate: Callable(exception) -> bool; True means retry.
+        reraise: If True, reraise the last exception instead of RetryLimitExceeded.
+        hooks: HookSet with optional lifecycle callbacks.
     """
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be >= 1")
 
-    _backoff = backoff if backoff is not None else constant(delay=1.0)
-
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
         def wrapper(*args, **kwargs):
+            ctx = RetryContext(func=fn, max_attempts=max_attempts)
             last_exc: Optional[Exception] = None
-            for attempt in range(1, max_attempts + 1):
+
+            for attempt_number in range(1, max_attempts + 1):
+                delay = backoff(attempt_number)
+                record = AttemptRecord(attempt_number=attempt_number, delay=delay)
+                hooks.fire_before_attempt(ctx, record)
+
                 try:
-                    return func(*args, **kwargs)
-                except exceptions as exc:  # type: ignore[misc]
+                    result = fn(*args, **kwargs)
+                    record.mark_success()
+                    ctx.record_attempt(record)
+                    hooks.fire_after_attempt(ctx, record)
+                    hooks.fire_on_success(ctx, record)
+                    return result
+                except Exception as exc:
+                    record.mark_failure(exc)
+                    ctx.record_attempt(record)
+                    hooks.fire_after_attempt(ctx, record)
                     last_exc = exc
-                    if attempt == max_attempts:
-                        logger.debug(
-                            "%s failed after %d attempt(s): %s",
-                            func.__qualname__,
-                            attempt,
-                            exc,
-                        )
-                        break
-                    delay = _backoff(attempt)
-                    logger.debug(
-                        "%s attempt %d/%d failed (%s). Retrying in %.2fs.",
-                        func.__qualname__,
-                        attempt,
-                        max_attempts,
-                        exc,
-                        delay,
-                    )
-                    if on_retry is not None:
-                        on_retry(attempt, exc)
-                    time.sleep(delay)
-            raise last_exc  # type: ignore[misc]
+
+                    if not predicate(exc):
+                        hooks.fire_on_failure(ctx, record)
+                        raise NonRetryableError(
+                            f"Non-retryable exception: {exc!r}",
+                            last_exception=exc,
+                            attempts=attempt_number,
+                        ) from exc
+
+                    hooks.fire_on_failure(ctx, record)
+
+                    if attempt_number < max_attempts:
+                        time.sleep(delay)
+
+            if reraise and last_exc is not None:
+                raise last_exc
+
+            raise RetryLimitExceeded(
+                last_exception=last_exc,
+                attempts=max_attempts,
+            )
+
         return wrapper
+
     return decorator
