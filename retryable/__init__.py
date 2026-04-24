@@ -1,5 +1,25 @@
-from retryable.decorator import retry
-from retryable.backoff import constant, linear, exponential
+"""retryable — Lightweight retry decorator library with configurable backoff strategies."""
 
-__all__ = ["retry", "constant", "linear", "exponential"]
-__version__ = "0.1.0"
+from retryable.backoff import constant, exponential, linear
+from retryable.decorator import retry
+from retryable.exceptions import NonRetryableError, RetryError, RetryLimitExceeded
+from retryable.predicates import (
+    combine,
+    exclude_exceptions,
+    on_all_exceptions,
+    on_exception,
+)
+
+__all__ = [
+    "retry",
+    "constant",
+    "linear",
+    "exponential",
+    "RetryError",
+    "RetryLimitExceeded",
+    "NonRetryableError",
+    "on_exception",
+    "on_all_exceptions",
+    "exclude_exceptions",
+    "combine",
+]
