@@ -78,3 +78,28 @@ def combine(*predicates: Callable[[BaseException], bool]) -> Callable[[BaseExcep
         return all(p(exc) for p in predicates)
 
     return predicate
+
+
+def combine_any(*predicates: Callable[[BaseException], bool]) -> Callable[[BaseException], bool]:
+    """Combine multiple predicates with logical OR — any one returning True triggers a retry.
+
+    Args:
+        *predicates: Predicate callables to combine.
+
+    Returns:
+        A callable that returns True when at least one predicate returns True.
+
+    Example:
+        >>> pred = combine_any(on_exception(ValueError), on_exception(TypeError))
+        >>> pred(ValueError("bad"))
+        True
+        >>> pred(RuntimeError("oops"))
+        False
+    """
+    if not predicates:
+        raise ValueError("At least one predicate must be provided.")
+
+    def predicate(exc: BaseException) -> bool:
+        return any(p(exc) for p in predicates)
+
+    return predicate
