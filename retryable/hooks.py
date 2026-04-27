@@ -1,46 +1,44 @@
-"""Hooks for observing retry lifecycle events."""
-from typing import Callable, Optional
+"""Hook infrastructure for before/after retry attempt callbacks."""
+from __future__ import annotations
+
+from typing import Callable, List
+
 from retryable.context import AttemptRecord, RetryContext
 
+BeforeHook = Callable[[RetryContext], None]
+AfterHook = Callable[[RetryContext, AttemptRecord], None]
 
-HookFn = Callable[[RetryContext, AttemptRecord], None]
 
-
-def on_retry(fn: HookFn) -> HookFn:
-    """Mark a callable as a retry hook (identity, for documentation/typing)."""
+def on_retry(fn: BeforeHook) -> BeforeHook:
+    """Mark a callable as a before-attempt hook (identity decorator)."""
     return fn
 
 
 class HookSet:
-    """Container for lifecycle hooks attached to a retry decorator."""
+    """Container for before and after attempt hooks.
+
+    Attributes
+    ----------
+    before:
+        Hooks called before each attempt with the current :class:`RetryContext`.
+    after:
+        Hooks called after each attempt with context and :class:`AttemptRecord`.
+    """
 
     def __init__(
         self,
-        before_attempt: Optional[HookFn] = None,
-        after_attempt: Optional[HookFn] = None,
-        on_failure: Optional[HookFn] = None,
-        on_success: Optional[HookFn] = None,
+        before: List[BeforeHook] | None = None,
+        after: List[AfterHook] | None = None,
     ) -> None:
-        self.before_attempt = before_attempt
-        self.after_attempt = after_attempt
-        self.on_failure = on_failure
-        self.on_success = on_success
+        self.before: List[BeforeHook] = list(before or [])
+        self.after: List[AfterHook] = list(after or [])
 
-    def fire_before_attempt(self, ctx: RetryContext, record: AttemptRecord) -> None:
-        if self.before_attempt is not None:
-            self.before_attempt(ctx, record)
+    def fire_before_attempt(self, ctx: RetryContext) -> None:
+        """Invoke all registered before-attempt hooks."""
+        for hook in self.before:
+            hook(ctx)
 
     def fire_after_attempt(self, ctx: RetryContext, record: AttemptRecord) -> None:
-        if self.after_attempt is not None:
-            self.after_attempt(ctx, record)
-
-    def fire_on_failure(self, ctx: RetryContext, record: AttemptRecord) -> None:
-        if self.on_failure is not None:
-            self.on_failure(ctx, record)
-
-    def fire_on_success(self, ctx: RetryContext, record: AttemptRecord) -> None:
-        if self.on_success is not None:
-            self.on_success(ctx, record)
-
-
-EMPTY_HOOKS = HookSet()
+        """Invoke all registered after-attempt hooks."""
+        for hook in self.after:
+            hook(ctx, record)
