@@ -1,94 +1,97 @@
-"""High-level retry policy combining all retryable components."""
+"""RetryPolicy — assembles all retry components into a single configurable object."""
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Tuple, Type
+import time
+from typing import Any, Callable, Optional, Tuple, Type
 
 from retryable.backoff import exponential
-from retryable.budget import RetryBudget
-from retryable.circuit_breaker import CircuitBreaker
-from retryable.decorator import retry
-from retryable.jitter import full as full_jitter
+from retryable.context import RetryContext
+from retryable.exceptions import NonRetryableError, RetryLimitExceeded
+from retryable.fallback import Fallback
+from retryable.hooks import HookSet
+from retryable.jitter import none as no_jitter
 from retryable.predicates import on_all_exceptions
-from retryable.rate_limit import RateLimiter
-from retryable.throttle import RetryThrottle
-from retryable.timeout import RetryTimeout
 
 
 def flaky(
     max_attempts: int = 3,
-    *,
     exceptions: Tuple[Type[BaseException], ...] = (Exception,),
-    base_delay: float = 0.5,
-    max_delay: float = 30.0,
-    jitter: bool = True,
-) -> Callable:
-    """Convenience decorator for common flaky-function retry scenarios."""
-    backoff = exponential(base=base_delay, max_delay=max_delay)
-    jitter_fn = full_jitter if jitter else None
-    predicate = on_all_exceptions if exceptions == (Exception,) else None
+) -> "RetryPolicy":
+    """Convenience factory: simple exponential-backoff policy."""
+    from retryable.predicates import on_exception
 
-    kwargs = dict(
+    return RetryPolicy(
         max_attempts=max_attempts,
-        backoff=backoff,
+        predicate=on_exception(*exceptions),
     )
-    if jitter_fn:
-        kwargs["jitter"] = jitter_fn
-    if predicate:
-        kwargs["predicate"] = predicate
-
-    return retry(**kwargs)
 
 
 class RetryPolicy:
-    """Composable retry policy object.
-
-    Combines backoff, jitter, predicate, budget, rate-limiter, throttle,
-    circuit-breaker, and timeout into a single reusable policy that can be
-    applied as a decorator or called directly.
-    """
+    """Orchestrates retry logic, delegating to pluggable components."""
 
     def __init__(
         self,
+        *,
         max_attempts: int = 3,
-        backoff: Optional[Callable] = None,
-        jitter: Optional[Callable] = None,
-        predicate: Optional[Callable] = None,
-        budget: Optional[RetryBudget] = None,
-        rate_limiter: Optional[RateLimiter] = None,
-        throttle: Optional[RetryThrottle] = None,
-        circuit_breaker: Optional[CircuitBreaker] = None,
-        timeout: Optional[RetryTimeout] = None,
+        backoff=None,
+        jitter=None,
+        predicate=None,
+        hooks: Optional[HookSet] = None,
+        fallback: Optional[Fallback] = None,
+        budget=None,
+        timeout=None,
     ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
         self.max_attempts = max_attempts
         self.backoff = backoff or exponential()
-        self.jitter = jitter
-        self.predicate = predicate or on_all_exceptions
+        self.jitter = jitter or no_jitter()
+        self.predicate = predicate or on_all_exceptions()
+        self.hooks = hooks or HookSet()
+        self.fallback = fallback
         self.budget = budget
-        self.rate_limiter = rate_limiter
-        self.throttle = throttle
-        self.circuit_breaker = circuit_breaker
         self.timeout = timeout
 
-    def apply(self, fn: Callable) -> Callable:
-        """Wrap *fn* with the configured retry logic."""
-        kwargs: dict = dict(
-            max_attempts=self.max_attempts,
-            backoff=self.backoff,
-            predicate=self.predicate,
-        )
-        if self.jitter:
-            kwargs["jitter"] = self.jitter
-        if self.budget:
-            kwargs["budget"] = self.budget
-        if self.throttle:
-            kwargs["throttle"] = self.throttle
-        if self.circuit_breaker:
-            kwargs["circuit_breaker"] = self.circuit_breaker
-        if self.timeout:
-            kwargs["timeout"] = self.timeout
-        return retry(**kwargs)(fn)
+    def apply(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Execute *fn* with retry logic applied."""
+        ctx = RetryContext()
+        if self.timeout is not None:
+            self.timeout.start()
 
-    def __call__(self, fn: Callable) -> Callable:
-        """Allow the policy instance to be used directly as a decorator."""
-        return self.apply(fn)
+        for attempt in range(1, self.max_attempts + 1):
+            self.hooks.fire_before_attempt(ctx, attempt)
+            delay = self.jitter(self.backoff(attempt))
+            exc: Optional[BaseException] = None
+            try:
+                result = fn(*args, **kwargs)
+                ctx.record_attempt(attempt, delay=delay, exception=None)
+                self.hooks.fire_after_attempt(ctx, ctx.last)
+                return result
+            except BaseException as e:
+                exc = e
+                ctx.record_attempt(attempt, delay=delay, exception=e)
+                self.hooks.fire_after_attempt(ctx, ctx.last)
+                if not self.predicate(e):
+                    raise NonRetryableError(e, attempts=attempt) from e
+                if attempt < self.max_attempts:
+                    if self.timeout is not None and self.timeout.is_expired():
+                        break
+                    if self.budget is not None and not self.budget.consume():
+                        break
+                    time.sleep(delay)
+
+        last_exc = ctx.last.exception if ctx.last else None
+        if self.fallback is not None and last_exc is not None:
+            return self.fallback(last_exc, *args, **kwargs)
+        raise RetryLimitExceeded(last_exc, attempts=ctx.total_attempts)
+
+    def __call__(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Allow RetryPolicy to be used as a decorator."""
+        import functools
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return self.apply(fn, *args, **kwargs)
+
+        return wrapper
