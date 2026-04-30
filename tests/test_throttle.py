@@ -66,6 +66,17 @@ class TestRetryThrottleAllow:
         t.reset()
         assert t.allow() is True
 
+    def test_blocked_attempt_does_not_consume_slot(self):
+        """A call to allow() that returns False must not record a timestamp,
+        so the remaining count stays at zero rather than going negative."""
+        t = RetryThrottle(max_attempts=2, window_seconds=60.0)
+        t.allow()
+        t.allow()
+        assert t.remaining() == 0
+        t.allow()  # blocked
+        t.allow()  # blocked
+        assert t.remaining() == 0
+
 
 class TestRetryThrottleWindow:
     def test_old_timestamps_evicted_after_window(self):
