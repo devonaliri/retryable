@@ -50,6 +50,13 @@ class RetryMetrics:
             return None
         return self.total_attempts / len(self.attempt_counts)
 
+    @property
+    def most_common_exception(self) -> Optional[str]:
+        """Name of the most frequently raised exception type, or None if none recorded."""
+        if not self.exception_counts:
+            return None
+        return max(self.exception_counts, key=lambda k: self.exception_counts[k])
+
     def reset(self) -> None:
         """Clear all collected metrics."""
         self.total_calls = 0
