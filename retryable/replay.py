@@ -71,6 +71,11 @@ class ReplayLog:
         with self._lock:
             self._entries.clear()
 
+    def failed_entries(self) -> List[CallReplay]:
+        """Return a snapshot of all recorded replays that did not succeed."""
+        with self._lock:
+            return [e for e in self._entries if not e.succeeded]
+
     def make_hooks(self, fn_name: str):
         """Return *(before_hook, after_hook)* suitable for use with :class:`HookSet`."""
         state: dict = {}
