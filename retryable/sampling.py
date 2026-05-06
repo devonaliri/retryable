@@ -71,6 +71,19 @@ class RetrySampler:
         self._total = 0
         self._sampled = 0
 
+    def update_rate(self, rate: float) -> None:
+        """Update the sampling rate without resetting counters.
+
+        Args:
+            rate: New probability in the range (0.0, 1.0].
+
+        Raises:
+            ValueError: If *rate* is outside the allowed range.
+        """
+        if not (0.0 < rate <= 1.0):
+            raise ValueError(f"rate must be in (0, 1], got {rate!r}")
+        self._rate = rate
+
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"RetrySampler(rate={self._rate!r}, "
