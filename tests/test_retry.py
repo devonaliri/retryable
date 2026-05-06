@@ -78,8 +78,17 @@ class TestRetryDecorator:
 
     @patch("retryable.decorator.time.sleep")
     def test_does_not_catch_unspecified_exception(self, mock_sleep):
-        func = MagicMock(side_effect=KeyError("nope"))
+        func = MagicMock(side_effect=KeyError("not retried"))
         decorated = retry(max_attempts=3, exceptions=ValueError, backoff=constant(0))(func)
         with pytest.raises(KeyError):
             decorated()
         assert func.call_count == 1
+
+    @patch("retryable.decorator.time.sleep")
+    def test_sleep_called_with_backoff_delay(self, mock_sleep):
+        """Verify that time.sleep is called with the delay returned by the backoff strategy."""
+        func = MagicMock(side_effect=[ValueError("fail"), ValueError("fail"), "ok"])
+        decorated = retry(max_attempts=3, exceptions=ValueError, backoff=constant(1.5))(func)
+        decorated()
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_called_with(1.5)
