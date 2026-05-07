@@ -11,6 +11,7 @@ from retryable.replay import ReplayLog
 
 class TestReplayIntegration:
     def _make_log_and_hooks(self, fn_name: str):
+        """Create a ReplayLog and a HookSet wired to it for the given function name."""
         log = ReplayLog()
         before, after = log.make_hooks(fn_name)
         hooks = HookSet(before_attempt=[before], after_attempt=[after])
@@ -70,3 +71,18 @@ class TestReplayIntegration:
         multi()
         multi()
         assert len(log.entries()) == 3
+
+    def test_failed_entry_records_exception_type(self):
+        """The replay entry for an exhausted retry should capture the exception type."""
+        log, hooks = self._make_log_and_hooks("typed_fail")
+
+        @retry(max_attempts=2, hooks=hooks)
+        def typed_fail():
+            raise ValueError("specific error")
+
+        with pytest.raises(Exception):
+            typed_fail()
+
+        entry = log.latest()
+        assert entry.succeeded is False
+        assert entry.exception_type == "ValueError"
